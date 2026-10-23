@@ -226,65 +226,113 @@ def _download_tikwm(url: str, out_dir: str) -> tuple:
         return None, "tikwm download: %s" % e
 
 
+# ===== KHEMCLIP YT FIX v1 =====
+# YouTube answers "Sign in to confirm you're not a bot" to datacenter IPs (Render). This block adds:
+#   - cookies.txt support (admin sends the file to the bot, or env YTDLP_COOKIES_B64 / YTDLP_COOKIES)
+#   - optional proxy (env YTDLP_PROXY, e.g. a residential proxy)
+#   - a second YouTube attempt with another client, TikTok via tikwm first, friendly error messages
+#   - one single download_media() (the file used to define it twice; the first copy was dead code)
+import base64 as _b64
+import html as _html
+
+
+def _esc(s):
+    return _html.escape(str(s or ""), quote=False)
+
+
+COOKIES_FILE = os.path.join(DATA_DIR, "cookies.txt")
+
+
+def _cookies_path():
+    """cookies.txt for yt-dlp: sent by the admin (stored in DATA_DIR) or taken from the environment."""
+    try:
+        if os.path.isfile(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 50:
+            return COOKIES_FILE
+        raw = os.environ.get("YTDLP_COOKIES_B64", "").strip()
+        txt = _b64.b64decode(raw).decode("utf-8", "ignore") if raw else os.environ.get("YTDLP_COOKIES", "")
+        if txt and "\n" not in txt and "\\n" in txt:      # env var pasted with literal \n
+            txt = txt.replace("\\n", "\n")
+        if txt and txt.strip():
+            p = os.path.join(DATA_DIR, "cookies_env.txt")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(txt if txt.endswith("\n") else txt + "\n")
+            os.chmod(p, 0o600)
+            return p
+    except Exception as e:
+        log.warning("cookies: %s", e)
+    return None
+
+
+def _is_youtube(url: str) -> bool:
+    u = (url or "").lower()
+    return any(x in u for x in ("youtube.com", "youtu.be", "youtube-nocookie.com"))
+
+
+def _ytdlp_base(url: str, use_cookies: bool = True) -> list:
+    args = [
+        "yt-dlp", "--no-playlist", "--no-warnings", "--newline",
+        "--max-filesize", "49M", "--retries", "3", "--fragment-retries", "3", "--socket-timeout", "30",
+    ]
+    proxy = os.environ.get("YTDLP_PROXY", "").strip()
+    if proxy:
+        args += ["--proxy", proxy]
+    ck = _cookies_path()
+    if use_cookies and ck and (_is_youtube(url) or os.environ.get("YTDLP_COOKIES_ALL") == "1"):
+        args += ["--cookies", ck]
+    return args
+
+
+def _friendly_dl_error(stderr: str, url: str) -> str:
+    s = (stderr or "").strip()
+    low = s.lower()
+    if "not a bot" in low or "sign in to confirm" in low:
+        if _cookies_path():
+            return ("⚠️ YouTube នៅតែបដិសេធ ទោះមាន cookies (អាចផុតកំណត់)។ "
+                    "Admin សូម export cookies ថ្មី ឬប្រើ proxy (YTDLP_PROXY)។")
+        return ("⚠️ YouTube មិនអនុញ្ញាតឲ្យ server នេះទាញវីដេអូ (bot check)។ "
+                "សូមសាកល្បង link ពី TikTok / Facebook ឬប្រាប់ Admin ឲ្យដាក់ cookies។\n"
+                "(Admin: ផ្ញើ file cookies.txt មក bot ឬកំណត់ env YTDLP_COOKIES_B64 / YTDLP_PROXY)")
+    if "larger than max-filesize" in low:
+        return "❌ ឯកសារធំពេកសម្រាប់ Telegram (>49MB)"
+    if "private video" in low or "video unavailable" in low or "has been removed" in low:
+        return "❌ វីដេអូនេះ private ឬត្រូវបានលុបហើយ"
+    if "confirm your age" in low or "age-restricted" in low:
+        return "❌ វីដេអូនេះត្រូវការគណនី (កំណត់អាយុ)"
+    return s[-300:] or "yt-dlp failed"
+
+
 def download_media(url: str, out_dir: str) -> tuple:
     """Return (filepath, error). Prefer mp4 under ~49MB for Telegram."""
-    import urllib.parse  # noqa: F401 — used by tikwm
-
     out_tmpl = os.path.join(out_dir, "dl.%(ext)s")
-    chrome_ua = (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
-    )
-    last_err = "yt-dlp failed"
+    ua = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
+          "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1")
+    errs = []
 
-    # 1) TikTok: try tikwm first (more reliable when yt-dlp challenge breaks)
-    if _is_tiktok(url):
+    if _is_tiktok(url):                                   # tikwm first (works when yt-dlp is challenged)
         path, err = _download_tikwm(url, out_dir)
         if path:
             return path, ""
-        last_err = err or last_err
-        log.warning("tikwm fallback failed: %s", last_err)
+        errs.append(err or "")
 
-    # 2) yt-dlp attempts
     attempts = []
-    if _is_tiktok(url):
-        attempts.append([
-            "yt-dlp", "--no-playlist", "--no-warnings",
-            "-o", out_tmpl, "--max-filesize", "49M",
-            "--retries", "2",
-            "--user-agent", chrome_ua,
-            "--impersonate", "chrome",
-            "-f", "b",
-            url,
-        ])
-        attempts.append([
-            "yt-dlp", "--no-playlist", "--no-warnings",
-            "-o", out_tmpl, "--max-filesize", "49M",
-            "--user-agent", chrome_ua,
-            "-f", "best",
-            url,
-        ])
-        attempts.append([
-            "yt-dlp", "--no-playlist", "--no-warnings",
-            "-o", out_tmpl, "--max-filesize", "49M",
-            "--extractor-args", "tiktok:api_hostname=api16-normal-c-useast1a.tiktokv.com",
-            "-f", "best",
-            url,
-        ])
+    if _is_youtube(url):
+        fmt = "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/b[height<=720]/b"
+        attempts.append(_ytdlp_base(url) + ["-o", out_tmpl, "-f", fmt, "--merge-output-format", "mp4", url])
+        # second chance with another client (no cookies: that client does not use them)
+        attempts.append(_ytdlp_base(url, use_cookies=False) + [
+            "--extractor-args", "youtube:player_client=android_vr",
+            "-o", out_tmpl, "-f", "b[height<=720]/b", url])
+    elif _is_tiktok(url):
+        b = _ytdlp_base(url) + ["--user-agent", ua, "--add-header", "Referer:https://www.tiktok.com/"]
+        attempts.append(b + ["--extractor-args", "tiktok:api_hostname=api16-normal-c-useast1a.tiktokv.com",
+                             "-o", out_tmpl, "-f", "b[ext=mp4]/best", url])
+        attempts.append(b + ["--extractor-args", "tiktok:webpage_download=True", "-o", out_tmpl, "-f", "best", url])
+        attempts.append(_ytdlp_base(url) + ["-o", out_tmpl, "-f", "best", url])
     else:
-        attempts.append([
-            "yt-dlp", "--no-playlist", "--no-warnings",
-            "-o", out_tmpl, "--max-filesize", "49M",
-            "-f", "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720]/b",
-            "--merge-output-format", "mp4",
-            url,
-        ])
-        attempts.append([
-            "yt-dlp", "--no-playlist", "--no-warnings",
-            "-o", out_tmpl, "--max-filesize", "49M",
-            "-f", "best",
-            url,
-        ])
+        attempts.append(_ytdlp_base(url) + [
+            "-o", out_tmpl, "-f", "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/b",
+            "--merge-output-format", "mp4", url])
+        attempts.append(_ytdlp_base(url) + ["-o", out_tmpl, "-f", "best[filesize<49M]/best", url])
 
     try:
         for cmd in attempts:
@@ -295,106 +343,74 @@ def download_media(url: str, out_dir: str) -> tuple:
             found = _find_media(out_dir)
             if found:
                 return found, ""
-            last_err = (r.stderr or r.stdout or last_err)[-500:]
-        # last resort tikwm again if not tried path
-        if _is_tiktok(url):
-            path, err = _download_tikwm(url, out_dir)
-            if path:
-                return path, ""
-            last_err = (last_err + " | " + (err or ""))[-500:]
-        return None, last_err
-    except subprocess.TimeoutExpired:
-        return None, "timeout — តំណភ្ជាប់យូរពេក"
-    except Exception as e:
-        return None, str(e)
-
-
-
-def download_media(url: str, out_dir: str) -> tuple[str | None, str]:
-    """Return (filepath, error). Prefer mp4 under ~49MB for Telegram."""
-    out_tmpl = os.path.join(out_dir, "dl.%(ext)s")
-    ua = (
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
-        "Mobile/15E148 Safari/604.1"
-    )
-    base = [
-        "yt-dlp",
-        "--no-playlist",
-        "--no-warnings",
-        "--newline",
-        "-o", out_tmpl,
-        "--max-filesize", "49M",
-        "--retries", "3",
-        "--fragment-retries", "3",
-        "--socket-timeout", "30",
-        "--user-agent", ua,
-        "--add-header", "Referer:https://www.tiktok.com/",
-        "--add-header", "Accept-Language:en-US,en;q=0.9",
-    ]
-
-    attempts = []
-    if _is_tiktok(url):
-        # TikTok: try extractor args + mobile UA variants
-        attempts.append(base + [
-            "--extractor-args", "tiktok:api_hostname=api16-normal-c-useast1a.tiktokv.com",
-            "-f", "b[ext=mp4]/best",
-            url,
-        ])
-        attempts.append(base + [
-            "--extractor-args", "tiktok:webpage_download=True",
-            "-f", "best",
-            url,
-        ])
-        attempts.append([
-            "yt-dlp", "--no-playlist", "--no-warnings",
-            "-o", out_tmpl, "--max-filesize", "49M",
-            "--user-agent", ua,
-            "-f", "download",
-            url,
-        ])
-        attempts.append([
-            "yt-dlp", "--no-playlist", "--no-warnings",
-            "-o", out_tmpl, "--max-filesize", "49M",
-            "-f", "best",
-            url,
-        ])
-    else:
-        attempts.append(base + [
-            "-f", "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/b",
-            "--merge-output-format", "mp4",
-            url,
-        ])
-        attempts.append([
-            "yt-dlp", "--no-playlist", "--no-warnings",
-            "-o", out_tmpl, "--max-filesize", "49M",
-            "-f", "best[filesize<49M]/best",
-            url,
-        ])
-
-    last_err = "yt-dlp failed"
-    try:
-        for cmd in attempts:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=200)
-            files = sorted(Path(out_dir).glob("dl.*"), key=lambda p: p.stat().st_mtime, reverse=True)
-            for f in files:
-                if f.is_file() and f.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".opus", ".mov"):
-                    if f.stat().st_size > 1000:
-                        return str(f), ""
-            # also any media file created
-            files2 = sorted(Path(out_dir).iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
-            for f in files2:
-                if f.is_file() and f.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".opus", ".mov"):
-                    if f.stat().st_size > 1000:
-                        return str(f), ""
-            last_err = (r.stderr or r.stdout or last_err)[-500:]
+            errs.append((r.stderr or r.stdout or "")[-600:])
             if r.returncode == 0:
                 break
-        return None, last_err
+        joined = "\n".join(e for e in errs if e)
+        return None, _friendly_dl_error(joined, url)
     except subprocess.TimeoutExpired:
         return None, "timeout — តំណភ្ជាប់យូរពេក"
     except Exception as e:
         return None, str(e)
+
+
+# ---- admin: manage cookies.txt from Telegram (registered BEFORE on_text, which would swallow commands) ----
+@bot.message_handler(commands=["cookies"])
+def cmd_cookies(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    src = "ឯកសារ cookies.txt" if os.path.isfile(COOKIES_FILE) else ("env" if _cookies_path() else "")
+    bot.reply_to(
+        message,
+        "🍪 cookies: " + ("✅ មាន (%s)" % src if src else "❌ គ្មាន") +
+        "\nProxy: " + ("✅" if os.environ.get("YTDLP_PROXY") else "❌") +
+        "\n\nផ្ញើ file <b>cookies.txt</b> (Netscape format) មកទីនេះ ដើម្បីដាក់។\n/delcookies — លុប",
+    )
+
+
+@bot.message_handler(commands=["delcookies"])
+def cmd_delcookies(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    try:
+        if os.path.isfile(COOKIES_FILE):
+            os.remove(COOKIES_FILE)
+        bot.reply_to(message, "🗑 បានលុប cookies")
+    except Exception as e:
+        bot.reply_to(message, "❌ %s" % _esc(e))
+
+
+@bot.message_handler(content_types=["document"])
+def on_document(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    doc = message.document
+    name = (doc.file_name or "").lower()
+    if not name.endswith(".txt") or (doc.file_size or 0) > 1024 * 1024:
+        bot.reply_to(message, "ផ្ញើ file <b>cookies.txt</b> (≤1MB) ប៉ុណ្ណោះ")
+        return
+    try:
+        data = bot.download_file(bot.get_file(doc.file_id).file_path).decode("utf-8", "ignore")
+        rows = [l for l in data.splitlines() if l.strip() and not l.startswith("#") and len(l.split("\t")) >= 7]
+        if not rows:
+            bot.reply_to(message, "❌ មិនមែន cookies.txt (Netscape format) ទេ")
+            return
+        with open(COOKIES_FILE, "w", encoding="utf-8") as f:
+            f.write(data if data.endswith("\n") else data + "\n")
+        os.chmod(COOKIES_FILE, 0o600)
+        yt = sum(1 for l in rows if "youtube" in l or "google" in l)
+        try:
+            bot.delete_message(message.chat.id, message.message_id)   # the file holds login secrets
+        except Exception:
+            pass
+        bot.send_message(
+            message.chat.id,
+            "✅ បានរក្សាទុក cookies (%d ជួរ, YouTube/Google: %d)%s" % (
+                len(rows), yt, "" if yt else "\n⚠️ គ្មាន cookies របស់ YouTube ទេ"),
+        )
+    except Exception as e:
+        bot.reply_to(message, "❌ %s" % _esc(e))
+# ===== END KHEMCLIP YT FIX =====
 
 
 def run_tts(text: str, voice: str, out_path: str) -> str | None:
@@ -440,7 +456,7 @@ def on_text(message):
         try:
             path, err = download_media(url, tmp)
             if not path:
-                bot.edit_message_text(f"❌ ទាញមិនបាន:\n<code>{err[:300]}</code>", message.chat.id, status.message_id)
+                bot.edit_message_text(f"❌ ទាញមិនបាន:\n<code>{_esc(err[:300])}</code>", message.chat.id, status.message_id)
                 return
             size = os.path.getsize(path)
             if size > 49 * 1024 * 1024:
