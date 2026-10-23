@@ -34,8 +34,8 @@ except Exception:
     DATA_DIR = "."
     os.makedirs(DATA_DIR, exist_ok=True)
 
-BOT_NAME = "ទាញសូរ"
-BOT_NAME_EN = "TeanhSor"
+BOT_NAME = "Techsor"
+BOT_NAME_EN = "Techsor"
 
 # Khmer neural voices (edge-tts)
 VOICE_MALE = "km-KH-PisethNeural"
@@ -155,38 +155,92 @@ def cb_tts_voice(call):
     )
 
 
+def _is_tiktok(url: str) -> bool:
+    u = (url or "").lower()
+    return any(x in u for x in ("tiktok.com", "vm.tiktok.com", "vt.tiktok.com", "tiktok."))
+
+
 def download_media(url: str, out_dir: str) -> tuple[str | None, str]:
     """Return (filepath, error). Prefer mp4 under ~49MB for Telegram."""
-    out_tmpl = os.path.join(out_dir, "%(title).80s.%(ext)s")
-    cmd = [
+    out_tmpl = os.path.join(out_dir, "dl.%(ext)s")
+    ua = (
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
+        "Mobile/15E148 Safari/604.1"
+    )
+    base = [
         "yt-dlp",
         "--no-playlist",
-        "-f", "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720]/b",
-        "--merge-output-format", "mp4",
+        "--no-warnings",
+        "--newline",
         "-o", out_tmpl,
         "--max-filesize", "49M",
-        "--no-warnings",
-        url,
+        "--retries", "3",
+        "--fragment-retries", "3",
+        "--socket-timeout", "30",
+        "--user-agent", ua,
+        "--add-header", "Referer:https://www.tiktok.com/",
+        "--add-header", "Accept-Language:en-US,en;q=0.9",
     ]
+
+    attempts = []
+    if _is_tiktok(url):
+        # TikTok: try extractor args + mobile UA variants
+        attempts.append(base + [
+            "--extractor-args", "tiktok:api_hostname=api16-normal-c-useast1a.tiktokv.com",
+            "-f", "b[ext=mp4]/best",
+            url,
+        ])
+        attempts.append(base + [
+            "--extractor-args", "tiktok:webpage_download=True",
+            "-f", "best",
+            url,
+        ])
+        attempts.append([
+            "yt-dlp", "--no-playlist", "--no-warnings",
+            "-o", out_tmpl, "--max-filesize", "49M",
+            "--user-agent", ua,
+            "-f", "download",
+            url,
+        ])
+        attempts.append([
+            "yt-dlp", "--no-playlist", "--no-warnings",
+            "-o", out_tmpl, "--max-filesize", "49M",
+            "-f", "best",
+            url,
+        ])
+    else:
+        attempts.append(base + [
+            "-f", "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/b",
+            "--merge-output-format", "mp4",
+            url,
+        ])
+        attempts.append([
+            "yt-dlp", "--no-playlist", "--no-warnings",
+            "-o", out_tmpl, "--max-filesize", "49M",
+            "-f", "best[filesize<49M]/best",
+            url,
+        ])
+
+    last_err = "yt-dlp failed"
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-        if r.returncode != 0:
-            # fallback simpler
-            cmd2 = [
-                "yt-dlp", "--no-playlist",
-                "-f", "best[filesize<49M]/best",
-                "-o", out_tmpl, "--no-warnings", url,
-            ]
-            r = subprocess.run(cmd2, capture_output=True, text=True, timeout=180)
-            if r.returncode != 0:
-                err = (r.stderr or r.stdout or "yt-dlp failed")[-400:]
-                return None, err
-        # find file
-        files = sorted(Path(out_dir).glob("*"), key=lambda p: p.stat().st_mtime, reverse=True)
-        for f in files:
-            if f.is_file() and f.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".opus"):
-                return str(f), ""
-        return None, "រកឯកសារមិនឃើញ"
+        for cmd in attempts:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=200)
+            files = sorted(Path(out_dir).glob("dl.*"), key=lambda p: p.stat().st_mtime, reverse=True)
+            for f in files:
+                if f.is_file() and f.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".opus", ".mov"):
+                    if f.stat().st_size > 1000:
+                        return str(f), ""
+            # also any media file created
+            files2 = sorted(Path(out_dir).iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+            for f in files2:
+                if f.is_file() and f.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".opus", ".mov"):
+                    if f.stat().st_size > 1000:
+                        return str(f), ""
+            last_err = (r.stderr or r.stdout or last_err)[-500:]
+            if r.returncode == 0:
+                break
+        return None, last_err
     except subprocess.TimeoutExpired:
         return None, "timeout — តំណភ្ជាប់យូរពេក"
     except Exception as e:
@@ -284,7 +338,7 @@ def on_text(message):
                     message.chat.id,
                     f,
                     caption=f"🔊 <b>{BOT_NAME}</b>\nសំឡេង: {label}\n\n{text[:120]}",
-                    title="TeanhSor TTS",
+                    title="Techsor TTS",
                     performer=label,
                 )
             try:
