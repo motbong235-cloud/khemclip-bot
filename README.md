@@ -1,16 +1,9 @@
-# ខ្មែរClip (KhemClip)
+# ទាញសូរ (TeanhSor)
 
-Telegram bot:
-- 📥 Download video by link (yt-dlp)
-- 🔊 Khmer TTS — ប្រុស (Piseth) / ស្រី (Sreymom) via edge-tts
+Download video by link + Khmer TTS (male/female).
 
 ## Env
-- `BOT_TOKEN` — from @BotFather
-- `ADMIN_ID` — optional
+- `BOT_TOKEN`
+- `ADMIN_ID` (optional)
+- `WELCOME_BANNER` (optional image URL)
 - `DATA_DIR=/var/data`
-
-## Run
-```bash
-pip install -r requirements.txt
-python bot.py
-```

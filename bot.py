@@ -34,8 +34,8 @@ except Exception:
     DATA_DIR = "."
     os.makedirs(DATA_DIR, exist_ok=True)
 
-BOT_NAME = "ខ្មែរClip"
-BOT_NAME_EN = "KhemClip"
+BOT_NAME = "ទាញសូរ"
+BOT_NAME_EN = "TeanhSor"
 
 # Khmer neural voices (edge-tts)
 VOICE_MALE = "km-KH-PisethNeural"
@@ -84,15 +84,22 @@ def tts_kb():
 @bot.message_handler(commands=["start", "help"])
 def cmd_start(message):
     waiting.pop(message.from_user.id, None)
-    bot.send_message(
-        message.chat.id,
-        f"🎬 <b>{BOT_NAME}</b> <i>({BOT_NAME_EN})</i>\n\n"
-        f"📥 <b>ទាញវីដេអូ</b> — ផ្ញើ link (TikTok, YouTube, FB…)\n"
-        f"🔊 <b>TTS ខ្មែរ</b> — បម្លែងអត្ថបទជាសំឡេង\n"
-        f"   · 👨 ប្រុស · 👩 ស្រី\n\n"
-        f"គ្រាន់តែផ្ញើ <b>link</b> ឬ ចុចម៉ឺនុយខាងក្រោម 👇",
-        reply_markup=main_kb(),
-    )
+    first = (message.from_user.first_name or "មិត្ត").strip()
+    caption = (
+        "សួស្តី <b>%s</b>!\n\n"
+        "🎬 <b>%s</b> · <i>%s</i>\n\n"
+        "📥 <b>ទាញវីដេអូ</b> — TikTok · YouTube · Facebook…\n"
+        "🔊 <b>TTS ខ្មែរ</b> — ប្រុស (Piseth) · ស្រី (Sreymom)\n\n"
+        "ផ្ញើ <b>link</b> ឬ ចុចម៉ឺនុយខាងក្រោម 👇"
+    ) % (first, BOT_NAME, BOT_NAME_EN)
+    banner = (os.environ.get("WELCOME_BANNER") or "").strip()
+    try:
+        if banner:
+            bot.send_photo(message.chat.id, banner, caption=caption, reply_markup=main_kb())
+        else:
+            bot.send_message(message.chat.id, caption, reply_markup=main_kb())
+    except Exception:
+        bot.send_message(message.chat.id, caption, reply_markup=main_kb())
 
 
 @bot.message_handler(func=lambda m: m.text in ("ℹ️ ជួយ", "ជួយ"))
@@ -225,7 +232,7 @@ def on_text(message):
             return
         url = m.group(0).rstrip(").,]}>\"'")
         status = bot.reply_to(message, "📥 កំពុងទាញ…")
-        tmp = tempfile.mkdtemp(prefix="khemclip_")
+        tmp = tempfile.mkdtemp(prefix="teanhsor_")
         try:
             path, err = download_media(url, tmp)
             if not path:
@@ -264,7 +271,7 @@ def on_text(message):
         if text.startswith("tts:"):
             text = text[4:].strip()
         status = bot.reply_to(message, "🔊 កំពុងបង្កើតសំឡេង…")
-        tmp = tempfile.mkdtemp(prefix="khemtts_")
+        tmp = tempfile.mkdtemp(prefix="teanhsor_tts_")
         out = os.path.join(tmp, "speech.mp3")
         try:
             err = run_tts(text, voice, out)
@@ -277,7 +284,7 @@ def on_text(message):
                     message.chat.id,
                     f,
                     caption=f"🔊 <b>{BOT_NAME}</b>\nសំឡេង: {label}\n\n{text[:120]}",
-                    title="KhemClip TTS",
+                    title="TeanhSor TTS",
                     performer=label,
                 )
             try:
