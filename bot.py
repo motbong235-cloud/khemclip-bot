@@ -157,7 +157,157 @@ def cb_tts_voice(call):
 
 def _is_tiktok(url: str) -> bool:
     u = (url or "").lower()
-    return any(x in u for x in ("tiktok.com", "vm.tiktok.com", "vt.tiktok.com", "tiktok."))
+    return any(x in u for x in ("tiktok.com", "vm.tiktok.", "vt.tiktok.", "tiktok."))
+
+
+def _find_media(out_dir: str):
+    try:
+        files = sorted(Path(out_dir).iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+    except Exception:
+        return None
+    for f in files:
+        if f.is_file() and f.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".opus", ".mov"):
+            if f.stat().st_size > 1000:
+                return str(f)
+    return None
+
+
+def _download_tikwm(url: str, out_dir: str) -> tuple:
+    """Fallback TikTok via tikwm public API (no watermark when available)."""
+    import urllib.request
+    import json as _json
+    api = "https://www.tikwm.com/api/?url=" + urllib.parse.quote(url, safe="")
+    req = urllib.request.Request(
+        api,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+            "Referer": "https://www.tikwm.com/",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=45) as resp:
+            data = _json.loads(resp.read().decode("utf-8", errors="ignore"))
+    except Exception as e:
+        return None, "tikwm: %s" % e
+    if not isinstance(data, dict) or data.get("code") not in (0, "0", None):
+        # some responses use code 0 for ok
+        if not (isinstance(data, dict) and data.get("data")):
+            return None, "tikwm: %s" % (data.get("msg") if isinstance(data, dict) else "bad response")
+    d = data.get("data") or {}
+    play = d.get("play") or d.get("wmplay") or d.get("hdplay") or ""
+    if not play:
+        # images slideshow?
+        imgs = d.get("images") or []
+        if imgs:
+            return None, "tikwm: នេះជា slideshow រូប — មិនទាន់គាំទ្រ"
+        return None, "tikwm: រក link video មិនឃើញ"
+    # download file
+    out = os.path.join(out_dir, "tikwm.mp4")
+    try:
+        req2 = urllib.request.Request(
+            play,
+            headers={
+                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
+                "Referer": "https://www.tiktok.com/",
+            },
+        )
+        with urllib.request.urlopen(req2, timeout=120) as r, open(out, "wb") as f:
+            while True:
+                chunk = r.read(1024 * 256)
+                if not chunk:
+                    break
+                f.write(chunk)
+        if os.path.getsize(out) < 1000:
+            return None, "tikwm: file ទទេ"
+        return out, ""
+    except Exception as e:
+        return None, "tikwm download: %s" % e
+
+
+def download_media(url: str, out_dir: str) -> tuple:
+    """Return (filepath, error). Prefer mp4 under ~49MB for Telegram."""
+    import urllib.parse  # noqa: F401 — used by tikwm
+
+    out_tmpl = os.path.join(out_dir, "dl.%(ext)s")
+    chrome_ua = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+    )
+    last_err = "yt-dlp failed"
+
+    # 1) TikTok: try tikwm first (more reliable when yt-dlp challenge breaks)
+    if _is_tiktok(url):
+        path, err = _download_tikwm(url, out_dir)
+        if path:
+            return path, ""
+        last_err = err or last_err
+        log.warning("tikwm fallback failed: %s", last_err)
+
+    # 2) yt-dlp attempts
+    attempts = []
+    if _is_tiktok(url):
+        attempts.append([
+            "yt-dlp", "--no-playlist", "--no-warnings",
+            "-o", out_tmpl, "--max-filesize", "49M",
+            "--retries", "2",
+            "--user-agent", chrome_ua,
+            "--impersonate", "chrome",
+            "-f", "b",
+            url,
+        ])
+        attempts.append([
+            "yt-dlp", "--no-playlist", "--no-warnings",
+            "-o", out_tmpl, "--max-filesize", "49M",
+            "--user-agent", chrome_ua,
+            "-f", "best",
+            url,
+        ])
+        attempts.append([
+            "yt-dlp", "--no-playlist", "--no-warnings",
+            "-o", out_tmpl, "--max-filesize", "49M",
+            "--extractor-args", "tiktok:api_hostname=api16-normal-c-useast1a.tiktokv.com",
+            "-f", "best",
+            url,
+        ])
+    else:
+        attempts.append([
+            "yt-dlp", "--no-playlist", "--no-warnings",
+            "-o", out_tmpl, "--max-filesize", "49M",
+            "-f", "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720]/b",
+            "--merge-output-format", "mp4",
+            url,
+        ])
+        attempts.append([
+            "yt-dlp", "--no-playlist", "--no-warnings",
+            "-o", out_tmpl, "--max-filesize", "49M",
+            "-f", "best",
+            url,
+        ])
+
+    try:
+        for cmd in attempts:
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=200)
+            except FileNotFoundError:
+                return None, "yt-dlp មិនមានលើ server — deploy ឡើងវិញ"
+            found = _find_media(out_dir)
+            if found:
+                return found, ""
+            last_err = (r.stderr or r.stdout or last_err)[-500:]
+        # last resort tikwm again if not tried path
+        if _is_tiktok(url):
+            path, err = _download_tikwm(url, out_dir)
+            if path:
+                return path, ""
+            last_err = (last_err + " | " + (err or ""))[-500:]
+        return None, last_err
+    except subprocess.TimeoutExpired:
+        return None, "timeout — តំណភ្ជាប់យូរពេក"
+    except Exception as e:
+        return None, str(e)
+
 
 
 def download_media(url: str, out_dir: str) -> tuple[str | None, str]:
