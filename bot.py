@@ -252,6 +252,7 @@ def main_kb(uid: int | None = None):
         make_kb_button(kb_text("male", "សំឡេងប្រុស"), "male"),
         make_kb_button(kb_text("female", "សំឡេងស្រី"), "female"),
     )
+    kb.row(make_kb_button(kb_text("ocr", "ចម្លងអត្ថបទ"), "ocr"))
     kb.row(make_kb_button(kb_text("help", "ជួយ"), "help"))
     if uid and is_admin(uid):
         kb.row(make_kb_button(kb_text("admin", "Admin"), "admin"))
