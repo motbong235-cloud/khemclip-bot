@@ -1,0 +1,6 @@
+pyTelegramBotAPI==4.22.1
+Flask==3.0.3
+yt-dlp[default,curl-cffi]>=2025.10.14
+curl_cffi>=0.7.0
+edge-tts>=6.1.9
+requests>=2.31.0

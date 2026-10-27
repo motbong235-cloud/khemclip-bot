@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: khemclip-bot
+    runtime: python
+    plan: starter
+    region: singapore
+    buildCommand: (command -v ffmpeg >/dev/null || (apt-get update && apt-get install -y ffmpeg)) 2>/dev/null; pip install -r requirements.txt && pip install -U "yt-dlp[default,curl-cffi]" curl_cffi
+    startCommand: python bot.py
+    healthCheckPath: /health
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+      - key: DATA_DIR
+        value: /var/data
+      - key: PYTHON_VERSION
+        value: "3.11.0"
+    disk:
+      name: khemclip-data
+      mountPath: /var/data
+      sizeGB: 1
